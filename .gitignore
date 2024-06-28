@@ -1,0 +1,15 @@
+/__pycache__
+/log
+01_Online-SWAG
+02_Online-SWAG_Vikas
+03_Online-SWAG_with_learning_Sigma
+04_Online-SWAG_with_learning_Sigma_TN
+05_Online-SWAG_with_learning_Sigma_DEUP
+06_Online-SWAG_with_learning_Sigma_TN_fit
+07_Online-SWAG_Alone
+08_AllModels
+images
+models
+models2d
+utils
+*.pyc
