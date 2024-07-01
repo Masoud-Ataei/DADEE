@@ -19,8 +19,10 @@ from make_circle import make_circle
 from PyBullet_Functions import init_pybullet, update_simulator
 import tensorflow as tf
 from utils import Uncertainty_metrics,set_tf_GP_grow,set_tf_deterministic, set_seed
+from filelock import FileLock
 from matplotlib.patches import Circle, Ellipse
-    
+import platform
+
 def obs_ray(results):    
     points = []
     res = np.array([list(r[:3]+r[3]+r[4]) for r in results if r[0]>=0])
@@ -34,9 +36,59 @@ def obs_ray(results):
             points.append(l0[:,3:5])  
     return points
 
+
+def get_weights(model, parms):
+    var_weights = []
+    var_theta   = []
+    theta = []
+    model_det = parms['NN']['type']
+    if parms['NN']['DEUP'] or parms['NN']['MLLV']:
+        var_weights = [model.model_var[0].get_weights()]
+        if model_det == 'Ancor':    
+            var_theta = [model.model_var[0].theta_numpy]
+    if model_det == 'Baseline' or model_det == 'Res' :
+        weights = [model.model_mu[0].get_weights()] + var_weights
+    if model_det == 'Ensemble':
+        weights = [[model_mu[0].get_weights() for model_mu in model.models_mu]] + var_weights
+    if model_det == 'SWAG':
+        weights = [model.model_mu[0].get_weights()] + var_weights + [model.w_swa, model.s_diag_sq, model.D_hat]
+    if model_det == 'MC-D':
+        weights = [model.model_mu[0].get_weights()] + var_weights
+    if model_det == 'LA':
+        weights = [model.model_mu[0].get_weights()] + var_weights + [model.H.numpy()]
+    if model_det == 'Ancor':
+        theta = [[model_mu[0].theta_numpy for model_mu in model.models_mu]] + var_theta
+        weights = [[model_mu[0].get_weights() for model_mu in model.models_mu], model.model_var[0].get_weights(), ]
+    return weights, theta
+
+
+
+
 def run_robot(sim : Simulator, parms, Traj : trajectory, control : controller_DetFx, CF: control_Functions ,
               FxEstimator : estimate_DDFx, memory : ReplayMemory, 
               logFile = False, plots = False, verbose = False, save_model = False, save_plot = False):
+    
+
+    if platform.system() == 'Linux':    
+        mempath = "/dev/shm/"
+    else: 
+        mempath = ""  
+
+    memfiles = ['data.json', 'data.json.lock', 'model.json', 'model.json.lock']
+    for mf in memfiles:
+        if os.path.isfile(mempath + mf):
+            print('remove file: ', mempath+mf)
+            os.remove(mempath + mf)
+
+    if FxEstimator is not None:
+        lock_data  = FileLock(mempath + "data.json.lock")    
+        lock_model = FileLock(mempath + "model.json.lock")    
+        weights,theta = get_weights(FxEstimator, parms)
+
+        with lock_model:
+            json.dump({'parms' :parms, 
+                    'weights':weights,
+                    'theta':theta}, mempath + "model.json")   
 
     max_time_hour = parms['run']['max_time_hour']
     max_time = 60 * 60 * max_time_hour
@@ -85,7 +137,7 @@ def run_robot(sim : Simulator, parms, Traj : trajectory, control : controller_De
         pass
     
     print(f'controler:{model_det} car_name:{car_name} model:{car_model}')
-    fpath = "log/" + uem + model_det + "/" + now.strftime("%Y%m%d_%H%M%S") + "_" + car_model + "_" + car_name + f"_cp{parms['controler']['cp']:.2f}".replace('.','_') + "/"
+    fpath = "log/" + uem + model_det + "/" + now.strftime("%Y%m%d_%H%M%S") + "_" + car_model + "_" + car_name + "_cp1_0" + "/"
     parms_env['start-time']   = now
     parms_env['fpath'] = fpath
     sim_images = parms['sim']['save_images']
@@ -152,8 +204,6 @@ def run_robot(sim : Simulator, parms, Traj : trajectory, control : controller_De
     logs['FSlist'    ] = []
     logs['FDlist'    ] = []
     logs['FVlist'    ] = []
-    logs['FVarlist'  ] = []   
-    logs['FVSlist'  ] = []   
     logs['JElist'    ] = []
     logs['JSlist'    ] = []
     logs['FWl-FWr'] = []
@@ -229,9 +279,7 @@ def run_robot(sim : Simulator, parms, Traj : trajectory, control : controller_De
     exit = True
     while exit:
         if FxEstimator:
-            _FxE , _FxV = FxEstimator.predictFx(xt.reshape(1,-1), s = 0) 
-            if FxEstimator is not None:
-                _FxVS = FxEstimator.S
+            _FxE  = FxEstimator.predictFx(xt.reshape(1,-1)) [0]
             _JFxE = FxEstimator.predict_mean_Fx_gradient(xt.reshape(1,-1)) [0]
         else:
             _FxE  = veh_model.get_Fx (xt)
@@ -281,7 +329,9 @@ def run_robot(sim : Simulator, parms, Traj : trajectory, control : controller_De
         ax26 = fig2.add_subplot(236)
 
         plt.show()
-    logs['losslist']  = []
+    logs['losslist']  = [-1]
+    logs['acclist' ]  = [-1]
+    logs['val_loss' ]  = [-1]
     
     max_iter = parms['max_iter']
     xt       = parms_env['x0']
@@ -291,9 +341,7 @@ def run_robot(sim : Simulator, parms, Traj : trajectory, control : controller_De
     logs['u']    = []
     logs['xdot'] = []
     logs['metric'] = [['conf','area', 'MLP', 'RL2E', 'RMSCE']]
-    logs['excecute_time'] = {'train'     : [],
-                             'inference' : [],
-                             'control'   : []}
+    
     json.dump(logs, open(fpath + "logs.json",'w'))
     
     x_new    = xt.copy()
@@ -352,13 +400,20 @@ def run_robot(sim : Simulator, parms, Traj : trajectory, control : controller_De
             if smpl_itr:
                 _xdot = _xdot / dt / num_steps
 
-        if FxEstimator:
-            if control.status != 'infeasible':
-                memory.push_diff(xt.copy().astype(dtype = np.float32), u.copy().astype(dtype = np.float32), _xdot.copy().astype(dtype = np.float32)) 
-        
         logs['x'   ].append(xt   .copy())
         logs['u'   ].append(u    .copy())
         logs['xdot'].append(_xdot.copy()) 
+
+        if FxEstimator is not None:
+            with lock_data:
+                json.dump({'x': logs['x'   ],
+                        'u': logs['u'   ],
+                        'xdot':logs['xdot'   ]}, mempath + "data.json")
+        
+        
+            with lock_model:
+                model_data = json.load(mempath + "model.json")
+                load_weights(FxEstimator, model_data['weights'], model_data['theta'])
 
         if control.status  == 'optimal':
             itr_optimal += 1
@@ -387,212 +442,78 @@ def run_robot(sim : Simulator, parms, Traj : trajectory, control : controller_De
             pass
         # # #######################################################################################
 
-        epochs = 20
-        stat = 'infeasible'
-        Force = False
-        Not_optimal = 0            
-        while (stat != 'optimal') and (not exit): # and (Not_optimal >= 0):
-            time_elapsed = time.time() - run_start_time
-            logs['excecute_time']['train'].append(-time.time())
-            if time_elapsed > max_time:
-                exit = True
-                print('!!!  max time is reached!!!')
-                break
+        
+        Not_optimal = 0
+        time_elapsed = time.time() - run_start_time
+        if time_elapsed > max_time:
+            exit = True
+            print('!!!  max time is reached!!!')
+            break
 
-            if Not_optimal <= -100:
-                exit = True
-                print('!!!  Not optimal reach 100!!!')
-                break
+        if Not_optimal <= -200:
+            exit = True
+            print('!!!  Not optimal reach 200!!!')
+            break
+        
+        if FxEstimator and itr >0:
+            _FxE , _FxV = FxEstimator.predictFx(xt.reshape(1,-1), s = 0) 
+            _FxE  = _FxE[0].reshape((-1, FxEstimator.n_u))
+            _JFxE = FxEstimator.predict_mean_Fx_gradient(xt.reshape(1,-1)) [0]
+        else:            
+            _FxE  = veh_model.get_Fx (xt)
+            _JFxE = veh_model.get_JFx(xt)
+
+        ktilde = np.zeros(2)
+        clc_cons = True
+
+        st_ccp = 0.001
+        st_target = 0.99
+        clc_cons = True
+
+        if ccp>=st_target:
+            ccp = st_target
+        ccp += st_ccp
+        if FxEstimator and parms['run']['model_det'] != 'Known':            
+            if ccp>np.random.rand(1):
+                ktilde = np.zeros(2)                                
+            else:                
+                
+                if car_name == "Simple":
+                    ktilde = (np.random.rand(2) - 0.5) * np.array([u1lim, u2lim]) * 0.25 #* 0.25                    
+                if car_name == "Turtle" or car_name == 'Prius':
+                    ktilde = (np.random.rand(2) - 0.5) * np.array([u1lim, u2lim]) * 0.25 #* 0.25                    
+                if car_name == 'Husky':
+                    ktilde = (np.random.rand(2) - 0.5) * np.array([u1lim, u2lim]) * 0.25 #* 0.25
+                if len(obstacles)>0:    
+                    clc_cons = False
             
-            if FxEstimator and itr >0 and online:
-                if model_det == 'Baseline' or model_det == 'Res' :
-                    if (-Not_optimal) % 10 == 9:
-                        Nl = len(FxEstimator.model_mu[0].trainable_variables)
-                        RNl = np.random.randint(Nl)
-                        VVV = FxEstimator.model_mu[0].trainable_variables[RNl]
-                        VVV.assign_add(np.random.randn(*VVV.shape) * 0.001)
-                        
-                        if (parms['NN']['DEUP'] or parms['NN']['MLLV']):
-                            Nl = len(FxEstimator.model_var[0].trainable_variables)
-                            RNl = np.random.randint(Nl)
-                            VVV = FxEstimator.model_var[0].trainable_variables[RNl]
-                            VVV.assign_add(np.random.randn(*VVV.shape) * 0.01)
-                        
-                        print(-Not_optimal + 1 )  
-                        epochs = 1
-
-                    if len(memory) >=2:
-                        if itr % 10 == 9 or Force:                                     
-                            loss = FxEstimator.fit_model(memory, valid_data = None, valid_split = 0.1, epochs=epochs, var_epochs = 10, batch_size = 1000, lr = lr, verbose= False)                    
-                            logs['losslist' ].append(loss)                            
-                        
-                if model_det == 'Ensemble'  or model_det == 'Ancor':
-                    if (-Not_optimal) % 10 == 9:
-                        for i,_ in enumerate(FxEstimator.models_mu):
-                            Nl = len(FxEstimator.models_mu[i][0].get_weights())
-                            RNl = np.random.randint(Nl)
-                            VVV = FxEstimator.models_mu[i][0].trainable_variables[RNl]
-                            VVV.assign_add(np.random.randn(*VVV.shape) * 0.001)
-                        if (parms['NN']['DEUP'] or parms['NN']['MLLV']):
-                            Nl = len(FxEstimator.model_var[0].get_weights())
-                            RNl = np.random.randint(Nl)
-                            VVV = FxEstimator.model_var[0].trainable_variables[RNl]
-                            VVV.assign_add(np.random.randn(*VVV.shape) * 0.001)
-                        print(-Not_optimal + 1 )  
-                        epochs = 1
-                    if len(memory) >=2:
-                        if itr % 10 == 9 or Force:                                                                   
-                            loss = FxEstimator.fit_models(memory, valid_data = None, valid_split = 0.1, epochs=epochs, var_epochs = 10, batch_size = 1000, lr = lr, verbose= False)
-                            logs['losslist' ].append(loss)
-                    else:
-                        FxEstimator.reset()
-                
-                if model_det == 'SWAG':
-                    if (-Not_optimal) % 10 == 9:
-                        Nl = len(FxEstimator.model_mu[0].get_weights())
-                        RNl = np.random.randint(Nl)
-                        VVV = FxEstimator.model_mu[0].trainable_variables[RNl]
-                        VVV.assign_add(np.random.randn(*VVV.shape) * 0.001)
-                        if (parms['NN']['DEUP'] or parms['NN']['MLLV']):
-                            Nl = len(FxEstimator.model_var[0].get_weights())
-                            RNl = np.random.randint(Nl)
-                            VVV = FxEstimator.model_var[0].trainable_variables[RNl]
-                            VVV.assign_add(np.random.randn(*VVV.shape) * 0.001)
-                        print(-Not_optimal + 1 )  
-                        epochs = 1
-
-                    if len(memory) >=2:
-                        if itr % 10 == 9 or Force:
-                            acc, val = FxEstimator.fit_swag(memory, batch_size = 250, epochs_burn = 1, epochs_var = 10, lr = lr, delta = 0.01, verbose = False)
-                            logs['acclist'].append(acc)
-                            logs['val_loss' ].append(val)
-                    else:
-                        FxEstimator.reset()
-                
-                if model_det == 'LA':
-                    if (-Not_optimal) % 10 == 9:
-                        Nl = len(FxEstimator.model_mu[0].get_weights())
-                        RNl = np.random.randint(Nl)
-                        VVV = FxEstimator.model_mu[0].trainable_variables[RNl]
-                        VVV.assign_add(np.random.randn(*VVV.shape) * 0.001)
-                        if (parms['NN']['DEUP'] or parms['NN']['MLLV']):
-                            Nl = len(FxEstimator.model_var[0].get_weights())
-                            RNl = np.random.randint(Nl)
-                            VVV = FxEstimator.model_var[0].trainable_variables[RNl]
-                            VVV.assign_add(np.random.randn(*VVV.shape) * 0.001)
-                        print(-Not_optimal + 1 )  
-                        epochs = 1
-
-                    if len(memory) >=2:
-                        if itr % 10 == 9 or Force:
-                            # acc, val = FxEstimator.fit_swag(memory, batch_size = 250, lr = 0.03, delta = 0.001, opt = 'Adam', const_var = 0.1, const = 0.0, verbose= False)
-                            acc, val = FxEstimator.fit_LA(memory, epochs = 10, batch_size = 250, lr = lr, loss_coef = 1.0, const_var = 0.01, const = 0.0, verbose=False)
-                            logs['acclist'].append  (acc)
-                            logs['val_loss' ].append(val)
-                    else:
-                        FxEstimator.reset()
-                    
-                if model_det == 'MC-D':
-                    if (-Not_optimal) % 10 == 9:
-                        Nl = len(FxEstimator.model_mu[0].get_weights())
-                        RNl = np.random.randint(Nl)
-                        VVV = FxEstimator.model_mu[0].trainable_variables[RNl]
-                        VVV.assign_add(np.random.randn(*VVV.shape) * 0.001)
-                        if (parms['NN']['DEUP'] or parms['NN']['MLLV']):
-                            Nl = len(FxEstimator.model_var[0].get_weights())
-                            RNl = np.random.randint(Nl)
-                            VVV = FxEstimator.model_var[0].trainable_variables[RNl]
-                            VVV.assign_add(np.random.randn(*VVV.shape) * 0.001)
-                        print(-Not_optimal + 1 )  
-                        epochs = 1
-
-                    if len(memory) >=2:
-                        if itr % 10 == 9 or Force:
-                            acc, val = FxEstimator.fit_model_mc(memory, epochs=epochs, batch_size = 250, lr = lr, delta = 0.01, opt = 'Adam', const_var = 0.1, const = 0.01, verbose= False)
-
-                            logs['acclist' ].append(acc)
-                            logs['val_loss' ].append(val)
-            logs['excecute_time']['train'][-1] += time.time()
-            logs['excecute_time']['inference'].append(-time.time())
-            if FxEstimator and itr >0:
-                _FxE , _FxV = FxEstimator.predictFx(xt.reshape(1,-1), s = 0) 
-                _FxE  = _FxE[0].reshape((-1, FxEstimator.n_u))
-                if FxEstimator is not None:
-                    _FxVS = FxEstimator.S
-                _JFxE = FxEstimator.predict_mean_Fx_gradient(xt.reshape(1,-1)) [0]
-            else:            
-                _FxE  = veh_model.get_Fx (xt)
-                _JFxE = veh_model.get_JFx(xt)
-            logs['excecute_time']['inference'][-1] += time.time()
+        else:
             ktilde = np.zeros(2)
             clc_cons = True
 
-            st_ccp = 0.001
-            st_target = 0.99
-            clc_cons = True
-            if ccp>=st_target:
-                ccp = st_target
-            ccp += st_ccp
-            if FxEstimator and parms['run']['model_det'] != 'Known' and online:            
-                if ccp>np.random.rand(1):
-                    ktilde = np.zeros(2)                                
-                else:                
-                    
-                    if car_name == "Simple":
-                        ktilde = (np.random.rand(2) - 0.5) * np.array([u1lim, u2lim]) * 0.25 #* 0.25                    
-                    if car_name == "Turtle" or car_name == 'Prius':
-                        ktilde = (np.random.rand(2) - 0.5) * np.array([u1lim, u2lim]) * 0.25 #* 0.25                    
-                    if car_name == 'Husky':
-                        ktilde = (np.random.rand(2) - 0.5) * np.array([u1lim, u2lim]) * 0.25 #* 0.25
-                    if len(obstacles)>0:    
-                        clc_cons = False
-                
-            else:
-                ktilde = np.zeros(2)
-                clc_cons = True
-
-            ### Find Optimal Control
-            logs['excecute_time']['control'].append( -time.time())
-            if run != 'Rand':     
-                u, d1, d2, stat_cbc = control.estimate_u_EHRD( _FxE,_JFxE, xt, FxEstimator=FxEstimator, obstacles= obstacles,
-                                                        verbose=False, ktilde=ktilde, clc_cons=clc_cons) 
-                stat =  control.status
-            else:
-                if itr % 50 == 0:
-                    u     = np.ones(3, dtype = np.float32)
-                    u[1:] = (np.random.rand(2) - 0.5) * np.array([u1lim, u2lim]) * 2
-
-                d1, d2, stat_cbc = 0,0,[np.zeros(3), np.zeros([3,3])]
-                stat = 'optimal'
+        if run != 'Rand':     
+            u, d1, d2, stat_cbc = control.estimate_u_EHRD( _FxE,_JFxE, xt, FxEstimator=FxEstimator, obstacles= obstacles,
+                                                    verbose=False, ktilde=ktilde, clc_cons=clc_cons) 
+            stat =  control.status
+        else:
+            if itr % 50 == 0:
+                u     = np.ones(3, dtype = np.float32)
+                u[1:] = (np.random.rand(2) - 0.5) * np.array([u1lim, u2lim]) * 2
             
-            logs['excecute_time']['control'][-1] += time.time()
-                        
-            epochs = 1
-            exit, xd     = Traj.get_xd(xt)
-            if exit:
-                Traj.reset()
-                # exit = False #Loop again
-            if stat != 'optimal':
-                ccp = st_target - st_ccp
-                Force = True
-                Not_optimal -= 1
+            d1, d2, stat_cbc = 0,0,[np.zeros(3), np.zeros([3,3])]
+            stat = 'optimal'
+            
+
+        exit, xd     = Traj.get_xd(xt)
+        if exit:
+            # exit = False #Loop again
+            Traj.reset()
         logs['Not_optimal'].append(Not_optimal)
         if Not_optimal < 0:
             nopt = np.array(logs['Not_optimal'])
             print(f'Not optimal {Not_optimal} max {np.min(nopt)} Avg {np.mean(nopt)}')
-            
-        #### 'Calculate optimal'Calibrations::
-        if parms['run']['model_det'] != 'Known': 
-            if len(memory) > 3:
-                _xin, _uin, _yin = memory.get_samples(len(memory))
-                _my, _sy = FxEstimator.predictXdot(_xin, _uin)
-                if (not (parms['NN']['DEUP'] or parms['NN']['MLLV']) and (model_det == 'Baseline' or model_det == 'Res' )):                    
-                    pass
-                else:
-                    _bin,_conf,_area, MLP, RL2E, RMSCE = Uncertainty_metrics(_yin, _my, _sy)
-                    print(f'loss {acc:.3f},val {val:.3f}, area {_area:.3f}, MLP {MLP:.3f}, RL2E {RL2E:.3f}, RMSCE {RMSCE:.3f}')
-                    logs['metric'].append([_conf,_area, MLP, RL2E, RMSCE])
         
+
         ### Apply Control to robot
         FWr, FWl = 0, 0
         if car_name == "Simple": 
@@ -635,9 +556,6 @@ def run_robot(sim : Simulator, parms, Traj : trajectory, control : controller_De
         logs['V1_x'      ]   .append(np.array([ CF.V1x(xt, xd)]))
         
         logs['FElist'    ]   .append(_FxE.flatten())
-        logs['FVarlist'    ]   .append(_FxV.flatten())
-        logs['FVSlist'    ]   .append(_FxVS)
-        
         logs['FSlist'    ]   .append(veh_model.get_Fx (xt).flatten())
         sim_time += dt
         def take_diff_var_Fx(Fx, EFx, len_var = 100):
@@ -663,36 +581,11 @@ def run_robot(sim : Simulator, parms, Traj : trajectory, control : controller_De
         logs['CLC1_x'    ]   .append([CF.CLC1_(_FxE, _JFxE, xt, u, xd)]) 
         logs['delta1'    ]   .append(d1)
         logs['delta2'    ]   .append(d2)        
-        logs['FWl-FWr'   ]   .append([FWl,FWr])
-        if parms['NN']['DEUP'] or parms['NN']['MLLV']:
-            if model_det == 'Baseline' or model_det == 'Res' :
-                logs['weights'] = [FxEstimator.model_mu[0].get_weights(), FxEstimator.model_var[0].get_weights(), ]
-            if model_det == 'Ensemble':
-                logs['weights'] = [[model_mu[0].get_weights() for model_mu in FxEstimator.models_mu], FxEstimator.model_var[0].get_weights(), ]
-            if model_det == 'SWAG':
-                logs['weights'] = [FxEstimator.model_mu[0].get_weights(), FxEstimator.model_var[0].get_weights(), FxEstimator.w_swa, FxEstimator.s_diag_sq, FxEstimator.D_hat,]
-            if model_det == 'MC-D':
-                logs['weights'] = [FxEstimator.model_mu[0].get_weights(), FxEstimator.model_var[0].get_weights(),]
-            if model_det == 'LA':
-                logs['weights'] = [FxEstimator.model_mu[0].get_weights(), FxEstimator.model_var[0].get_weights(), FxEstimator.H.numpy(), ]
-            if model_det == 'Ancor':
-                logs['theta'] = [[model_mu[0].theta_numpy for model_mu in FxEstimator.models_mu], FxEstimator.model_var[0].theta_numpy, ]
-                logs['weights'] = [[model_mu[0].get_weights() for model_mu in FxEstimator.models_mu], FxEstimator.model_var[0].get_weights(), ]
-            
-        else:
-            if model_det == 'Baseline' or model_det == 'Res':
-                logs['weights'] = [FxEstimator.model_mu[0].get_weights(),]
-            if model_det == 'Ensemble':
-                logs['weights'] = [[model_mu[0].get_weights() for model_mu in FxEstimator.models_mu], ]
-            if model_det == 'SWAG':
-                logs['weights'] = [FxEstimator.model_mu[0].get_weights(), FxEstimator.w_swa, FxEstimator.s_diag_sq, FxEstimator.D_hat,]
-            if model_det == 'MC-D':
-                logs['weights'] = [FxEstimator.model_mu[0].get_weights(),]
-            if model_det == 'LA':
-                logs['weights'] = [FxEstimator.model_mu[0].get_weights(), FxEstimator.H.numpy(), ]
-            if model_det == 'Ancor':
-                logs['weights'] = [[model_mu[0].get_weights() for model_mu in FxEstimator.models_mu], ]
-                logs['theta']   = [[model_mu[0].theta_numpy for model_mu in FxEstimator.models_mu], ]
+        logs['FWl-FWr'   ]   .append([FWl,FWr])        
+        
+        if FxEstimator is not None:
+            logs['weights'], logs['theta'] = get_weights(FxEstimator, parms)
+
         if verbose:            
             if len(obstacles)>0:
                 print(f"opt{control.prob.status},{control.var.value}| Ep{control._Ep[:,:,0]}| Eq{control._Eq[:,0]}|")
@@ -799,9 +692,6 @@ def run_robot(sim : Simulator, parms, Traj : trajectory, control : controller_De
                     _xdot = _xdot / dt   #/ num_steps             
                     if smpl_itr:
                         _xdot = _xdot / dt / num_steps
-                if FxEstimator:
-                    if control.status != 'infeasible':
-                        memory.push(xt.copy().astype(dtype = np.float32), u.copy().astype(dtype = np.float32), _xdot.copy().astype(dtype = np.float32)) 
 
                 logs['x'   ].append(xt   .copy())
                 logs['u'   ].append(u    .copy())
@@ -945,7 +835,7 @@ def run_robot(sim : Simulator, parms, Traj : trajectory, control : controller_De
 def init_params(seed = 1):
     parms = {}    
     run       = 'Prob'     # Rand, Prob, Stand
-    model_det = 'Ancor'    # Known, Baseline, Ensemble, SWAG, LA, MC-D, Ancor, BNN
+    model_det = 'Ensemble' # Known, Baseline, Ensemble, SWAG, LA, MC-D, Ancor, BNN
     car_name  = 'Husky'    # Simple, Turtle, Husky, Prius
     car_model = 'Ack1'     # Ack1, TODO
     SOCP      = True
@@ -979,9 +869,8 @@ def init_params(seed = 1):
     t    = np.linspace(0,1.0, 4) * 2
     ddd  = 2.4
     path = np.vstack(( np.sin(t * np.pi) * ddd , -np.cos(t * np.pi) * ddd )).T 
-    
-    obstacles = [ [0.0, 0.0,1.0, 1.5, 0.0, "cylindr"],]
-    
+    obstacles = [ [0.3, 0.0,1.0, 1.5, 0.0, "cylindr"], ]
+
     if parms['run']['car_model'] == 'DD':
         n_x = 5 # x, y, th, w, v    # 1, p, a or 1, fr, fl?
         x0 = np.zeros(n_x); x0[:2] = path[0]; x0[2] = np.pi / 2 * 0 #[-0.25,-0.25]
@@ -1192,10 +1081,10 @@ def main(seed = 1):
             FxEstimator = init_model(parms['NN']['init_path'])   
         else:
             FxEstimator = estimate_DDFx(parms['NN'])   
-        memory = ReplayMemory(parms['memcapacity'])
+        # memory = ReplayMemory(parms['memcapacity'])
 
     run_robot(sim, parms, Traj, control, CF = CF, FxEstimator = FxEstimator, 
-                                memory = memory, logFile = True, plots = True, verbose= False,
+                                memory = None, logFile = True, plots = True, verbose= False,
                                 save_model = False, save_plot = False
                                 # NN = keras.models.load_model("model/model_500tanh_sim.nn")
                                 ) #Ofline model
@@ -1225,14 +1114,10 @@ def load_weights(model, weights, theta = None):
     elif model.type == 'Ancor':
         for m,w,th in zip(model.models_mu,weights[0], theta[0]):
             m[0].set_weights(w)
-            m[0].theta = [tf.convert_to_tensor(t) for t in th]
-            m[0].theta_numpy = th
+            m[0].theta = th
         if model.DEUP:
             model.model_var[0].set_weights(weights[1])               
-            model.model_var[0].theta = [tf.convert_to_tensor(t) for t in theta[1]]
-            model.model_var[0].theta_numpy = theta[1]
-        
-
+                        
     else:
         raise 'not implemented'
     return model
@@ -1240,11 +1125,8 @@ def init_model(path):
     init = json.load(path + 'init_vars.json')
     log  = json.load(path + 'logs.json')
     weights = log['weights']
-    theta = None
-    if 'theta' in log.keys():
-        theta = log['theta']
     model = estimate_DDFx(init['NN'])    
-    model = load_weights(model, weights, theta)
+    model = load_weights(model, weights)
     return model
 
 if __name__ == '__main__':     
@@ -1252,6 +1134,7 @@ if __name__ == '__main__':
     set_seed(1)
     set_tf_GP_grow()
     # set_tf_deterministic()
+    
     _cp = 1.73
     now   = datetime.datetime.now()    
     main(seed = 1)  

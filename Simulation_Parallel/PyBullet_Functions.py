@@ -30,7 +30,6 @@ def init_pybullet(flag, time_step, shaddow = False, fpath = "", Path = []):
     # p.configureDebugVisualizer(p.COV_ENABLE_TINY_RENDERER, 0)    
     p.resetSimulation()
     p.setAdditionalSearchPath(pybullet_data.getDataPath()) #optionally
-    p.setAdditionalSearchPath('../')
 
     # p.resetDebugVisualizerCamera( cameraDistance=2, cameraYaw=180, cameraPitch=270, cameraTargetPosition=[0,0,0])
     

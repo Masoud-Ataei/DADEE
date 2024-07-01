@@ -25,11 +25,10 @@ def loadObject(name, position, orientation, obj_list):
             noise = np.random.normal(0, size=3, scale=0.05)
             noise[-1] = 0
         break
-    
     if urdf.find('models')>= 0:
        urdf = '../' + urdf
 
-    if orientation == []:      
+    if orientation == []:
       object_id = p.loadURDF(urdf, list(position+noise), globalScaling = scale_)
     else:
       object_id = p.loadURDF(urdf, list(position+noise), orientation, globalScaling = scale_)
@@ -115,6 +114,6 @@ def initHuskyUR5(world_file, object_file):
         cons_link_lookup,
         ur5_dist,
         states) = loadWorld(world['entities'], object_file)
-    base = 0 # id_lookup['Husky']    
+    base = id_lookup['Husky']    
     return base, object_lookup, id_lookup, horizontal_list, ground_list, fixed_orientation, tolerances, properties, cons_cpos_lookup, cons_pos_lookup, cons_link_lookup, ur5_dist, states
  

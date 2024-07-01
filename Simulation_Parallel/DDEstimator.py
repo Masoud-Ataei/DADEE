@@ -149,7 +149,7 @@ class estimate_DDFx():
         elif self.type == 'Ancor':             
             self.n_ens      = parms_nn['Ancor']['n_ens']        
             self.prior      = parms_nn['Ancor']['prior']  
-            self.reg_ancor  = parms_nn['Ancor']['reg']  
+            self.reg        = parms_nn['Ancor']['reg']  
             self.mse_loss  = keras.losses.MeanSquaredError()      
             if self.MLLV:
                 raise 'not implemented'
@@ -233,7 +233,7 @@ class estimate_DDFx():
                 self.models_mu.append(model_mu)
 
             if self.DEUP or self.MLLV:
-                self.model_var = self.def_snn(lact_activ = 'relu', theta = True)
+                self.model_var = self.def_snn(lact_activ = 'relu', theta = True, loss_fn=self.custom_loss_ancor_var)
 
             if self.MLLV:
                 raise 'not implemented'
@@ -290,7 +290,7 @@ class estimate_DDFx():
         loss = self.mse_loss(y_true, y_pred)
         weights = model[0].trainable_weights
         
-        loss_layer = self.reg_ancor * tf.reduce_sum([tf.reduce_sum((w-t) ** 2) for w,t in zip(weights,theta)]) / self.N
+        loss_layer = self.reg * tf.reduce_sum([tf.reduce_sum((w-t) ** 2) for w,t in zip(weights,theta)]) / self.N
         return loss + loss_layer
     
     def custom_loss_ancor_var(self, y_true, y_pred):     
@@ -553,22 +553,15 @@ class estimate_DDFx():
                 raise 'not implemented'
 
 
-    def fit_model(self, memory = None, train_data = None, 
-                  epochs = 10, valid_data = None, valid_split = 0.0, 
-                  batch_size = 100, lr = 0.0, var_epochs = None, verbose= True, preloss = None):        
-                
+    
+    def fit_model(self, train_data, valid_data = None, valid_split = 0.0,  epochs = 10, batch_size = 100, lr = 0.01, var_epochs = None, verbose= True, preloss = None):        
+
         if var_epochs is None:
             var_epochs = epochs
 
-        if train_data is None and memory is None:
-            raise 'memory and train_data can\'t be None same time'
+        [xin, uin], xdotin = train_data
+        shuffle([xin, uin,xdotin])
         
-        if memory is None:
-            [xin, uin], xdotin = train_data
-            shuffle([xin, uin,xdotin]) 
-        else:            
-            xin, uin, xdotin = memory.get_samples(int(len(memory)))
-
         if lr > 0.0:
             self.set_lr(lr)
 
@@ -665,59 +658,51 @@ class estimate_DDFx():
                 
         return self.loss, self.loss_val
 
-
-    def fit_models(self, memory = None, train_data = None, 
-                   epochs = 10, valid_data = None, valid_split = 0.0, 
-                   batch_size = 100, lr = 0.0, var_epochs = None, verbose= True, preloss = None):        
-        
+    def fit_models(self, train_data, valid_data = None, valid_split = 0.0, epochs = 10, batch_size = 100, lr = 0.01, var_epochs = None, verbose= True, preloss = None):        
         if var_epochs is None:
             var_epochs = epochs
 
-        if train_data is None and memory is None:
-            raise 'memory and train_data can\'t be None same time'
-        
-        if memory is None:
-            [xin, uin], xdotin = train_data
-            shuffle([xin, uin,xdotin]) 
-            self.N = len(xin)
-        else:            
-            xin, uin, xdotin = memory.get_samples(int(len(memory)))
-            self.N = len(memory)
-        
+        [xin, uin], xdotin = train_data
+        xin = xin[:, 2:]
+        shuffle([xin, uin,xdotin])
+
         if lr > 0.0:
             self.set_lr(lr)
 
         if self.MLLV:
-            raise 'not implemented'        
-        
-        
-        xin = xin[:, 2:]                
-        loss_mu = []
-        loss = {}
-        if self.MLLV:
+            
+            h  = None
             for i, model_cmb in enumerate( self.models_cmb):
                 self.model_index = i
-                h = model_cmb.fit([xin,uin], xdotin, validation_data =valid_data, validation_split = valid_split, 
-                                batch_size=batch_size , epochs=epochs, verbose=verbose).history
-                loss_mu.append( h)
-            
+                h_ = model_cmb.fit([xin,uin], xdotin, validation_data =valid_data, validation_split = valid_split, batch_size=batch_size , epochs=epochs, verbose=verbose).history
+                if h is None:
+                    h = {}
+                    for k in h_.keys():
+                        h[k]  = np.array(h_[k])
+                else:
+                    for k in h_.keys():
+                        h[k] += (np.array(h_[k]) * i)                
+                        h[k]  = h[k] / (i+1)
             for k in h.keys():
-                loss[k] = list(np.mean([l[k] for l in loss_mu], axis = 0))
-            
-        else:
-                
+                h[k]  = list(h[k])
+        else:            
+            h  = None
             for i,model_mu in enumerate( self.models_mu):
                 self.model_index = i
-                h = model_mu[0] .fit([xin,uin], xdotin, validation_data =valid_data, validation_split = valid_split, 
-                                    batch_size=batch_size , epochs=epochs, verbose=verbose).history
-                loss_mu.append(h)
-            
-            
+                h_ = model_mu[0] .fit([xin,uin], xdotin, batch_size=batch_size , epochs=epochs, verbose=verbose).history
+                if h is None:
+                    h = {}
+                    for k in h_.keys():
+                        h[k]  = np.array(h_[k])
+                else:
+                    for k in h_.keys():
+                        h[k] += (np.array(h_[k]) * i)                
+                        h[k]  = h[k] / (i+1)
             for k in h.keys():
-                loss[k] = list(np.mean([l[k] for l in loss_mu], axis = 0))
-            
-            
+                h[k]  = list(h[k])
+
         if self.DEUP:
+            ### 3
             yhat  = [model_mu [0]([xin,uin]) for model_mu in self.models_mu]
             ymean = tf.reduce_mean         (yhat, axis = 0)
             yvar  = tf.math.reduce_variance(yhat, axis = 0)
@@ -726,26 +711,29 @@ class estimate_DDFx():
             ein = tf.math.maximum(ein, tf.zeros(ein.shape))            
             
             if valid_data is not None:
-                [xval, uval], xdotval = valid_data
-                yhat_val  = [model_mu [0]([xval,uval]) for model_mu in self.models_mu]
-                ymean_val = tf.reduce_mean         (yhat_val, axis = 0)
-                yvar_val  = tf.math.reduce_variance(yhat_val, axis = 0)
-                
-                e_val = (xdotval - ymean_val) ** 2 - yvar_val
-                e_val = tf.math.maximum(e_val, tf.zeros(e_val.shape))  
-                valid_data = [xval, uval], e_val
+                [v_xin, v_uin], v_xdotin = valid_data
 
-            h   = self.model_var[0].fit([xin,uin], ein, validation_data =valid_data, validation_split = valid_split, 
-                                        batch_size=batch_size , epochs=var_epochs, verbose=verbose).history
-            
+                v_yhat  = [model_mu [0]([v_xin,v_uin]) for model_mu in self.models_mu]
+                v_ymean = tf.reduce_mean         (v_yhat, axis = 0)
+                v_yvar  = tf.math.reduce_variance(v_yhat, axis = 0)
+                
+                v_ein = (v_xdotin - v_ymean) ** 2 - v_yvar
+                v_ein = tf.math.maximum(v_ein, tf.zeros(v_ein.shape))     
+                valid_data = ([v_xin, v_uin],v_ein)
+            h_var   = self.model_var[0].fit([xin,uin], ein, batch_size=batch_size , epochs=var_epochs, verbose=verbose).history
+            for k in h_var.keys():                
+                h['var_' + k] = h_var[k]
+        
+        if preloss is None:
+            preloss = h
+        else:
             for k in h.keys():
-                loss['var_' + k] = h[k]
-        if preloss is not None:
-            for k in preloss.keys():
-                preloss[k] += loss[k]
-            loss = preloss
-        self.loss = loss #+ self.hvar['loss'][-1]            
-        return self.loss
+                if k in preloss.keys():
+                    preloss[k] += h[k]
+                else:
+                    preloss[k] = h[k]
+        self.loss = h
+        return h
 
     def w_to_flat(self, weights):
         flattened = np.hstack([w.flatten() for w in weights])
@@ -1219,7 +1207,6 @@ class estimate_DDFx():
         x  = xin 
         xt = xin[:,2:]        
         xin = xin[:,2:]     
-        self.S = None
         if self.type == 'Baseline':
             my = self.model_mu [1] (xt)
             my = my.numpy()
@@ -1265,7 +1252,7 @@ class estimate_DDFx():
             if self.DEUP or self.MLLV:
                 S = self.model_var[1] (xt).numpy()            
                 sy = np.sqrt(np.abs(vy) + np.abs(S))
-                self.S = [sy, np.sqrt(np.abs(vy)), np.sqrt(np.abs(S))]
+                self.S = S
             else:
                 ### 2
                 sy = np.sqrt(np.abs(vy))

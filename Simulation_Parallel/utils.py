@@ -100,7 +100,12 @@ def plot_graph(FxEstimator, conf, x, y, x_train = None,y_train = None, my = None
     ax1.fill_between(x.numpy()[indx][:,0] , my[indx] -3*sy[indx],my[indx]+3*sy[indx],alpha = 0.2,color='blue',  label = '3 SD')
     ax1.fill_between(x.numpy()[indx][:,0] , my[indx] -2*sy[indx],my[indx]+2*sy[indx],alpha = 0.5,color='blue',  label = '2 SD')
     ax1.fill_between(x.numpy()[indx][:,0] , my[indx] -1*sy[indx],my[indx]+1*sy[indx],alpha = 0.8,color='blue',  label = '1 SD')
+    
+    # ax1.fill_between(x.numpy()[indx][:,0] , my[indx][:,0] -3*sy[indx][:,0],my[indx][:,0]+3*sy[indx][:,0],alpha = 0.2,color='blue',  label = '3 SD')
+    # ax1.fill_between(x.numpy()[indx][:,0] , my[indx][:,0] -2*sy[indx][:,0],my[indx][:,0]+2*sy[indx][:,0],alpha = 0.5,color='blue',  label = '2 SD')
+    # ax1.fill_between(x.numpy()[indx][:,0] , my[indx][:,0] -1*sy[indx][:,0],my[indx][:,0]+1*sy[indx][:,0],alpha = 0.8,color='blue',  label = '1 SD')
     ax1.plot(x.numpy()[indx][:,0],my[indx], label = 'Mean')
+    # ax1.plot(x[indx],yp.numpy()[indx], color='red')
     ax1.legend()
 
     ### Conf for updated weights
