@@ -1,5 +1,5 @@
 # DADEE
-Direct Aleatoric and Deep Ensemble-based Epistemic (DADEE)
+[Direct Aleatoric and Deep Ensemble-based Epistemic (DADEE)](https://arxiv.org/abs/2407.00616)
 
 # Results of 1D regression
 
